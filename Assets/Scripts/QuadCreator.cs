@@ -2,97 +2,242 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-[ExecuteInEditMode]
-public class QuadCreator : MonoBehaviour
-{
-    public float width = 1;
-    public float height = 1;
+namespace TerrainGeneration {
+    [ExecuteInEditMode]
+    public class QuadCreator : MonoBehaviour {
+        const string meshHolderName = "Terrain Mesh";
 
-    public float gridSize = 2;
+        public bool autoUpdate = true;
 
-    bool needsUpdate;
-    MeshFilter meshFilter;
-    MeshRenderer meshRenderer;
-    Mesh mesh;
+        public bool centralize = true;
+        public int gridSize = 20;
+        public float waterDepth = .2f;
+        public float edgeDepth = .2f;
 
-    void Update()
-    {
-        if (needsUpdate)
-        {
-            needsUpdate = false;
-            Generate();
-        }
-    }
+        public NoiseSettings noiseSettings;
+        public Material mat;
 
-    public void Generate()
-    {
-        if (meshFilter == null)
-        {
-            meshRenderer = gameObject.AddComponent<MeshRenderer>();
-            meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
-            meshFilter = gameObject.AddComponent<MeshFilter>();
+        public Biome water;
+        public Biome sand;
+        public Biome grass;
 
-            mesh = new Mesh();
-        }
+        [Header("Info")]
+        public int numTiles;
+        public int numLandTiles;
+        public int numWaterTiles;
+        public float waterPercent;
 
+        MeshFilter meshFilter;
+        MeshRenderer meshRenderer;
+        Mesh mesh;
 
-        var vertices = new List<Vector3>();
-        var triangles = new List<int>();
-        var uvs = new List<Vector2>();
-        var normals = new List<Vector3>();
-        Vector3[] normalsSet = new Vector3[4] {
-            Vector3.up,
-            Vector3.up,
-            Vector3.up,
-            Vector3.up
-        };
-        Vector2[] uv = new Vector2[4] {
-            new Vector2(0, 0),
-            new Vector2(1, 0),
-            new Vector2(0, 1),
-            new Vector2(1, 1)
-        };
+        bool needsUpdate;
 
-        for (int i = 0; i < gridSize; i++)
-        {
-            for (int j = 0; j < gridSize; j++)
-            {
-                int elevation = UnityEngine.Random.Range(0, 2);
-                float x = i * width;
-                float y = j * height;
-                Vector3[] quadVertices = new Vector3[4]{
-                    new Vector3(x, elevation, y),
-                    new Vector3(x + width, elevation, y),
-                    new Vector3(x, elevation, y + height),
-                    new Vector3(x + width, elevation, y + height)
-                };
-
-                int vertIndex = vertices.Count;
-                triangles.Add(vertIndex + 2);
-                triangles.Add(vertIndex + 1);
-                triangles.Add(vertIndex);
-                triangles.Add(vertIndex + 2);
-                triangles.Add(vertIndex + 3);
-                triangles.Add(vertIndex + 1);
-
-                vertices.AddRange(quadVertices);
-                normals.AddRange(normalsSet);
-                uvs.AddRange(uv);
+        void Update() {
+            if (needsUpdate) {
+                needsUpdate = false;
+                Generate();
             }
         }
 
+        public TerrainData Generate() {
+            CreateMeshComponents();
 
-        mesh.SetVertices(vertices);
-        mesh.SetNormals(normals);
-        mesh.SetTriangles(triangles, 0, true);
-        mesh.SetUVs(0, uvs);
+            int numTilesPerLine = Mathf.CeilToInt(gridSize);
+            float min = centralize ? -numTilesPerLine / 2f : 0;
+            float[,] map = HeightmapGenerator.GenerateHeightmap(noiseSettings, numTilesPerLine);
 
-        meshFilter.mesh = mesh;
+            var vertices = new List<Vector3>();
+            var triangles = new List<int>();
+            var uvs = new List<Vector2>();
+            var normals = new List<Vector3>();
+
+            // Some convenience stuff:
+            var biomes = new Biome[] { water, sand, grass };
+            Vector3[] upVectorX4 = { Vector3.up, Vector3.up, Vector3.up, Vector3.up };
+            Coord[] nswe = { Coord.up, Coord.down, Coord.left, Coord.right };
+            int[][] sideVertIndexByDir = { new int[] { 0, 1 }, new int[] { 3, 2 }, new int[] { 2, 0 }, new int[] { 1, 3 } };
+            Vector3[] sideNormalsByDir = { Vector3.forward, Vector3.back, Vector3.left, Vector3.right };
+
+            // Terrain data:
+            var terrainData = new TerrainData(numTilesPerLine);
+            numLandTiles = 0;
+            numWaterTiles = 0;
+
+            for (int y = 0; y < numTilesPerLine; y++) {
+                for (int x = 0; x < numTilesPerLine; x++) {
+                    Vector2 uv = GetBiomeInfo(map[x, y], biomes);
+                    uvs.AddRange(new Vector2[] { uv, uv, uv, uv });
+
+                    bool isWaterTile = uv.x == 0f;
+                    bool isLandTile = !isWaterTile;
+                    if (isWaterTile) {
+                        numWaterTiles++;
+                    }
+                    else {
+                        numLandTiles++;
+                    }
+
+                    // Vertices
+                    int vertIndex = vertices.Count;
+                    float height = isWaterTile ? -waterDepth : 0;
+                    Vector3 nw = new Vector3(min + x, height, min + y + 1);
+                    Vector3 ne = nw + Vector3.right;
+                    Vector3 sw = nw - Vector3.forward;
+                    Vector3 se = sw + Vector3.right;
+                    Vector3[] tileVertices = { nw, ne, sw, se };
+                    vertices.AddRange(tileVertices);
+                    normals.AddRange(upVectorX4);
+
+                    // Add triangles
+                    triangles.Add(vertIndex);
+                    triangles.Add(vertIndex + 1);
+                    triangles.Add(vertIndex + 2);
+                    triangles.Add(vertIndex + 1);
+                    triangles.Add(vertIndex + 3);
+                    triangles.Add(vertIndex + 2);
+
+                    // Bridge gaps between water and land tiles, and also fill in sides of map
+                    bool isEdgeTile = x == 0 || x == numTilesPerLine - 1 || y == 0 || y == numTilesPerLine - 1;
+                    if (isLandTile || isEdgeTile) {
+                        for (int i = 0; i < nswe.Length; i++) {
+                            int neighbourX = x + nswe[i].x;
+                            int neighbourY = y + nswe[i].y;
+                            bool neighbourIsOutOfBounds = neighbourX < 0 || neighbourX >= numTilesPerLine || neighbourY < 0 || neighbourY >= numTilesPerLine;
+                            bool neighbourIsWater = false;
+                            if (!neighbourIsOutOfBounds) {
+                                float neighbourHeight = map[neighbourX, neighbourY];
+                                neighbourIsWater = neighbourHeight <= biomes[0].height;
+                                if (neighbourIsWater) {
+                                    terrainData.shore[neighbourX, neighbourY] = true;
+                                }
+                            }
+
+                            if (neighbourIsOutOfBounds || (isLandTile && neighbourIsWater)) {
+                                float depth = waterDepth;
+                                if (neighbourIsOutOfBounds) {
+                                    depth = isWaterTile ? edgeDepth : edgeDepth + waterDepth;
+                                }
+                                vertIndex = vertices.Count;
+                                int edgeVertIndexA = sideVertIndexByDir[i][0];
+                                int edgeVertIndexB = sideVertIndexByDir[i][1];
+                                vertices.Add(tileVertices[edgeVertIndexA]);
+                                vertices.Add(tileVertices[edgeVertIndexA] + Vector3.down * depth);
+                                vertices.Add(tileVertices[edgeVertIndexB]);
+                                vertices.Add(tileVertices[edgeVertIndexB] + Vector3.down * depth);
+
+                                uvs.AddRange(new Vector2[] { uv, uv, uv, uv });
+                                int[] sideTriIndices = { vertIndex, vertIndex + 1, vertIndex + 2, vertIndex + 1, vertIndex + 3, vertIndex + 2 };
+                                triangles.AddRange(sideTriIndices);
+                                normals.AddRange(new Vector3[] { sideNormalsByDir[i], sideNormalsByDir[i], sideNormalsByDir[i], sideNormalsByDir[i] });
+                            }
+                        }
+                    }
+
+                    // Terrain data:
+                    terrainData.tileCentres[x, y] = nw + new Vector3(0.5f, 0, -0.5f);
+                    terrainData.walkable[x, y] = isLandTile;
+                }
+            }
+
+            // Update mesh:
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(triangles, 0, true);
+            mesh.SetUVs(0, uvs);
+            mesh.SetNormals(normals);
+
+            if (mat != null) {
+                meshRenderer.sharedMaterial = mat;
+            }
+
+            UpdateColours();
+
+            numTiles = numLandTiles + numWaterTiles;
+            waterPercent = numWaterTiles / (float)numTiles;
+            return terrainData;
+        }
+
+        void OnValidate() {
+            needsUpdate = true;
+
+        }
+
+        void UpdateColours() {
+            if (mat != null) {
+                mat.SetColor("_StartCols0", water.startCol);
+                mat.SetColor("_StartCols1", sand.startCol);
+                mat.SetColor("_StartCols2", grass.startCol);
+
+                mat.SetColor("_EndCols0", water.endCol);
+                mat.SetColor("_EndCols1", sand.endCol);
+                mat.SetColor("_EndCols2", grass.endCol);
+            }
+        }
+
+        void CreateMeshComponents() {
+
+            if (meshFilter == null) {
+                gameObject.AddComponent<MeshRenderer>();
+                gameObject.AddComponent<MeshFilter>();
+                meshFilter = gameObject.GetComponent<MeshFilter>();
+                meshRenderer = gameObject.GetComponent<MeshRenderer>();
+            }
+
+            if (meshFilter.sharedMesh == null) {
+                mesh = new Mesh();
+                mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                meshFilter.sharedMesh = mesh;
+            }
+            else {
+                mesh = meshFilter.sharedMesh;
+                mesh.Clear();
+            }
+
+            meshRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        }
+        Vector2 GetBiomeInfo(float height, Biome[] biomes) {
+            // Find current biome
+            int biomeIndex = 0;
+            float biomeStartHeight = 0;
+            for (int i = 0; i < biomes.Length; i++) {
+                if (height <= biomes[i].height) {
+                    biomeIndex = i;
+                    break;
+                }
+                biomeStartHeight = biomes[i].height;
+            }
+
+            Biome biome = biomes[biomeIndex];
+            float sampleT = Mathf.InverseLerp(biomeStartHeight, biome.height, height);
+            sampleT = (int)(sampleT * biome.numSteps) / (float)Mathf.Max(biome.numSteps, 1);
+
+            // UV stores x: biomeIndex and y: val between 0 and 1 for how close to prev/next biome
+            Vector2 uv = new Vector2(biomeIndex, sampleT);
+            return uv;
+        }
+
+        [Serializable]
+        public class Biome {
+            [Range(0, 1)]
+            public float height;
+            public Color startCol;
+            public Color endCol;
+            public int numSteps;
+        }
+
+        public class TerrainData {
+            public int size;
+            public Vector3[,] tileCentres;
+            public bool[,] walkable;
+            public bool[,] shore;
+
+            public TerrainData(int size) {
+                this.size = size;
+                tileCentres = new Vector3[size, size];
+                walkable = new bool[size, size];
+                shore = new bool[size, size];
+            }
+        }
+
     }
-
-    void OnValidate()
-    {
-        needsUpdate = true;
-    }
-
 }
