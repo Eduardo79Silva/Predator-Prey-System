@@ -6,7 +6,7 @@ namespace TerrainGeneration {
         public static float[,] GenerateHeightmap(NoiseSettings noiseSettings, int size, bool normalize = true) {
             var map = new float[size, size];
             var prng = new System.Random(noiseSettings.seed);
-            var noise = new Noise();
+            var noise = new Noise(noiseSettings.seed);
 
             var offsets = new Vector2[noiseSettings.numLayers];
             for (int layer = 0; layer < noiseSettings.numLayers; layer++) {
@@ -19,8 +19,8 @@ namespace TerrainGeneration {
             for (int x = 0; x < size; x++) {
                 for (int y = 0; y < size; y++) {
                     float frequency = noiseSettings.scale;
-                    float amplitude = 1.0f;
-                    float height = 0.0f;
+                    float amplitude = 1;
+                    float height = 0;
 
                     for (int layer = 0; layer < noiseSettings.numLayers; layer++) {
                         double sampleX = (double)x / size * frequency + offsets[layer].x + noiseSettings.offset.x;
